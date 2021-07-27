@@ -25,6 +25,7 @@ public static class Gas
         public double Temperature;
     }
 
+    [BurstCompile]
     public struct Mix
     {
         public int Oxygen;
@@ -221,14 +222,14 @@ public class Atmospherics : IDisposable
             Gas[0] = new NativeArray<Gas.Tile>(size * size, Allocator.Persistent);
             Gas[1] = new NativeArray<Gas.Tile>(size * size, Allocator.Persistent);
             Flow = new NativeArray<byte>(size * size, Allocator.Persistent);
-            Pressure = new NativeArray<float>[2];
-            Pressure[0] = new NativeArray<float>(size * size, Allocator.Persistent);
-            Pressure[1] = new NativeArray<float>(size * size, Allocator.Persistent);
+            Pressure = new NativeArray<double>[2];
+            Pressure[0] = new NativeArray<double>(size * size, Allocator.Persistent);
+            Pressure[1] = new NativeArray<double>(size * size, Allocator.Persistent);
         }
 
         public NativeArray<Gas.Tile>[] Gas;
         public NativeArray<byte> Flow;
-        public NativeArray<float>[] Pressure;
+        public NativeArray<double>[] Pressure;
         public int TotalMoles;
 
 
@@ -251,7 +252,7 @@ public class Atmospherics : IDisposable
         [ReadOnly] public NativeArray<Gas.Tile> South;
         [ReadOnly] public NativeArray<Gas.Tile> West;
         [WriteOnly] public NativeArray<Gas.Tile> Output;
-        [WriteOnly] public NativeArray<float> Pressure;
+        [WriteOnly] public NativeArray<double> Pressure;
         [ReadOnly] public int Size;
         [ReadOnly] public float SpreadFactor;
 
@@ -345,7 +346,7 @@ public class Atmospherics : IDisposable
             Gas.Absorb(ref mix, original, south, SpreadFactor);
 
             Output[index] = mix;
-            Pressure[index] = (float) Gas.Pressure(mix);
+            Pressure[index] = Gas.Pressure(mix);
         }
     }
 
@@ -539,13 +540,13 @@ public class Atmospherics : IDisposable
         var chunk = _chunks[chunkCoordinate];
 
         int localX = x - (chunkCoordinate.Item1 * size);
-        int localY = y - (chunkCoordinate.Item2 * size);
+        int localY = (size - 1) - (y - (chunkCoordinate.Item2 * size));
 
         var gas = chunk.Gas[Convert.ToInt32(flag)][localX + localY * size];
         return gas;
     }
-
-    public void ChunkColor(Color[] colors, Action<Color[], (int, int)> chunkUpdated)
+    
+    public void ChunkColor(Color[] colors, Action<Color[], (int, int)> chunkUpdated, Gradient gradient)
     {
         foreach (var chunk in _chunks)
         {
@@ -554,8 +555,8 @@ public class Atmospherics : IDisposable
             for (int i = 0; i < pressures.Length; i++)
             {
                 var pressure = pressures[i];
-                double deviation = Mathf.InverseLerp(0, (float) Gas.StandardPressure, pressure);
-                double mod = deviation % 1.0f;
+                
+                float deviation = Mathf.InverseLerp(0, (float) Gas.StandardPressure * 4, (float) pressure);
 
                 if (pressure == 0)
                 {
@@ -563,7 +564,7 @@ public class Atmospherics : IDisposable
                 }
                 else
                 {
-                    colors[i] = Color.HSVToRGB((float) mod, 1f, 1f);
+                    colors[i] = gradient.Evaluate(deviation);
                 }
             }
 
@@ -581,11 +582,9 @@ public class Atmospherics : IDisposable
 public class Tiler : MonoBehaviour
 {
     private Atmospherics _atmos;
-
     private int Size = 32;
-
     private Dictionary<(int, int), Texture2D> _textures = new Dictionary<(int, int), Texture2D>();
-
+    [SerializeField] private Gradient gradient;
 
     private void OnDestroy()
     {
@@ -603,7 +602,7 @@ public class Tiler : MonoBehaviour
     {
         if (Input.GetKeyDown(KeyCode.C))
         {
-            int standardMoles = (int) (Gas.StandardMoles0CTile) * 10;
+            int standardMoles = (int) (Gas.StandardMoles0CTile) * 1000;
 
             var mix = new Gas.Mix()
             {
@@ -614,16 +613,10 @@ public class Tiler : MonoBehaviour
                 NitrousOxide = 0
             };
 
-            Debug.Log((Gas.Pressure(new Gas.Tile()
-            {
-                Mix = mix,
-                Temperature = 293.15
-            })));
-
             _atmos.AddGas(mix,
                 293.15f,
-                UnityEngine.Random.Range(0, 1024),
-                UnityEngine.Random.Range(0, 512));
+                UnityEngine.Random.Range(64, 96),
+                UnityEngine.Random.Range(64, 96));
         }
 
         _atmos.Update();
@@ -635,8 +628,8 @@ public class Tiler : MonoBehaviour
 
         var rect = new Rect(0, 0, Size * 2, Size * 2);
 
-        int tileX = (int) ((Input.mousePosition.x - rect.x) / rect.width * Size);
-        int tileY = (int) ((Screen.height - Input.mousePosition.y - rect.y) / rect.height * Size);
+        int tileX = (int) (Input.mousePosition.x / rect.width * Size);
+        int tileY = (int) ((Screen.height - Input.mousePosition.y) / rect.height * Size);
 
         Color[] c = new Color[Size * Size];
         _atmos.ChunkColor(c, delegate(Color[] colors, (int, int) coordinates)
@@ -658,15 +651,15 @@ public class Tiler : MonoBehaviour
             texture.Apply();
 
             GUI.DrawTexture(textureRect, texture);
-        });
+        }, gradient);
 
 //
         var selectedTile = _atmos.GetGas(tileX, tileY);
 //
         GUI.Label(new Rect(20, 20, 200, 20), tileX + " " + tileY);
         GUI.Label(new Rect(512, 30, 200, 200), $"Total Moles = {selectedTile.Moles}\n" +
-                                               $"Total Pressure = {(Gas.Pressure(selectedTile) / 1000) / 2500}\n" +
-                                               $"Temperature = {selectedTile.Temperature} K\n" +
+                                               $"Total Pressure = {String.Format("{0:0.00}",(Gas.Pressure(selectedTile) / 2500))} kPa\n" +
+                                               $"Temperature = {String.Format("{0:0.00}", selectedTile.Temperature)} K\n" +
                                                $"Oxygen = {selectedTile.Mix.Oxygen}\n" +
                                                $"Nitrogen = {selectedTile.Mix.Nitrogen}\n" +
                                                $"Carbon Dioxide = {selectedTile.Mix.CarbonDioxide}\n" +
