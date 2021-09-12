@@ -9,20 +9,50 @@ using UnityEngine;
 using UnityEngine.Analytics;
 using Random = System.Random;
 
+public static class FlagsHelper
+{
+    public static bool IsSet<T>(T flags, T flag) where T : struct
+    {
+        int flagsValue = (int)(object)flags;
+        int flagValue = (int)(object)flag;
+
+        return (flagsValue & flagValue) != 0;
+    }
+
+    public static void Set<T>(ref T flags, T flag) where T : struct
+    {
+        int flagsValue = (int)(object)flags;
+        int flagValue = (int)(object)flag;
+
+        flags = (T)(object)(flagsValue | flagValue);
+    }
+
+    public static void Unset<T>(ref T flags, T flag) where T : struct
+    {
+        int flagsValue = (int)(object)flags;
+        int flagValue = (int)(object)flag;
+
+        flags = (T)(object)(flagsValue & (~flagValue));
+    }
+}
+
 public static class Gas
 {
-    public static readonly double GasConstant = 8.31;
+    public static readonly double GasConstant = 831;
     public static readonly double StandardPressure = 101325;
 
     public static readonly double StandardMoles0C = (StandardPressure) / (293.15 * GasConstant);
     public static readonly double StandardMoles0CTile = (StandardPressure * 2500) / (293.15 * GasConstant);
-
+    
+    
     [BurstCompile]
     public struct Tile
     {
         public long Moles => Mix.Oxygen + Mix.Nitrogen + Mix.CarbonDioxide + Mix.NitrousOxide + Mix.Plasma;
         public Mix Mix;
         public double Temperature;
+        
+        public double Pressure => (Moles * Temperature * GasConstant) / 2500;
     }
 
     [BurstCompile]
@@ -35,10 +65,7 @@ public static class Gas
         public int Plasma;
     }
 
-    public static double Pressure(Tile tile)
-    {
-        return (tile.Moles * tile.Temperature * GasConstant) / 2500;
-    }
+    
 
     private static int Moles(in Tile tile, double pressure)
     {
@@ -55,7 +82,7 @@ public static class Gas
     //Remove gas from source based on pressure difference between source and target
     public static void Spread(ref Gas.Tile source, in Gas.Tile original, in Gas.Tile target, float percentage)
     {
-        double difference = Gas.Pressure(original) - Gas.Pressure(target);
+        double difference = original.Pressure - target.Pressure;
 
         if (difference > 0)
         {
@@ -133,7 +160,7 @@ public static class Gas
 
     public static void Absorb(ref Gas.Tile source, in Gas.Tile original, in Gas.Tile target, float percentage)
     {
-        double difference = Gas.Pressure(target) - Gas.Pressure(original);
+        double difference = target.Pressure - original.Pressure;
 
         if (difference > 0)
         {
@@ -221,26 +248,47 @@ public class Atmospherics : IDisposable
             Gas = new NativeArray<Gas.Tile>[2];
             Gas[0] = new NativeArray<Gas.Tile>(size * size, Allocator.Persistent);
             Gas[1] = new NativeArray<Gas.Tile>(size * size, Allocator.Persistent);
-            Flow = new NativeArray<byte>(size * size, Allocator.Persistent);
-            Pressure = new NativeArray<double>[2];
-            Pressure[0] = new NativeArray<double>(size * size, Allocator.Persistent);
-            Pressure[1] = new NativeArray<double>(size * size, Allocator.Persistent);
+            
+            
+            Flow = new NativeArray<Flow>(size * size, Allocator.Persistent);
+            Wall = new NativeArray<Flow>(size * size, Allocator.Persistent);
+
+            for (int i = 0; i < size * size; i++)
+            {
+                Flow[i] = Atmospherics.Flow.All;
+            }
+            
+            Pressure = new NativeArray<double>(size * size, Allocator.Persistent);
         }
 
         public NativeArray<Gas.Tile>[] Gas;
-        public NativeArray<byte> Flow;
-        public NativeArray<double>[] Pressure;
-        public int TotalMoles;
-
+        public NativeArray<double> Pressure;
+        public NativeArray<Flow> Wall;
+        public NativeArray<Flow> Flow;
 
         public void Dispose()
         {
             Gas[0].Dispose();
             Gas[1].Dispose();
+            Pressure.Dispose();
             Flow.Dispose();
-            Pressure[0].Dispose();
-            Pressure[1].Dispose();
+            Wall.Dispose();
         }
+    }
+
+    [Flags]
+    public enum Flow : int
+    {
+        North = 1,
+        South = 2,
+        East = 4,
+        West = 8,
+        All = 15
+    }
+
+    private static bool HasFlow(Flow flow, Flow flag)
+    {
+        return (flow & flag) != 0;
     }
 
     [BurstCompile]
@@ -253,6 +301,7 @@ public class Atmospherics : IDisposable
         [ReadOnly] public NativeArray<Gas.Tile> West;
         [WriteOnly] public NativeArray<Gas.Tile> Output;
         [WriteOnly] public NativeArray<double> Pressure;
+        [ReadOnly] public NativeArray<Flow> Flow;
         [ReadOnly] public int Size;
         [ReadOnly] public float SpreadFactor;
 
@@ -335,20 +384,37 @@ public class Atmospherics : IDisposable
             Gas.Tile original = Input[index];
             Gas.Tile mix = original;
 
-            Gas.Spread(ref mix, original, east, SpreadFactor);
-            Gas.Spread(ref mix, original, west, SpreadFactor);
-            Gas.Spread(ref mix, original, north, SpreadFactor);
-            Gas.Spread(ref mix, original, south, SpreadFactor);
+            Flow flow = Flow[index];
+            
+            if (HasFlow(flow, Atmospherics.Flow.North))
+            {
+                Gas.Spread(ref mix, original, south, SpreadFactor);
+                Gas.Absorb(ref mix, original, south, SpreadFactor);
+            }
 
-            Gas.Absorb(ref mix, original, east, SpreadFactor);
-            Gas.Absorb(ref mix, original, west, SpreadFactor);
-            Gas.Absorb(ref mix, original, north, SpreadFactor);
-            Gas.Absorb(ref mix, original, south, SpreadFactor);
+            if (HasFlow(flow, Atmospherics.Flow.South))
+            {
+                Gas.Spread(ref mix, original, north, SpreadFactor);
+                Gas.Absorb(ref mix, original, north, SpreadFactor);
+            }
+
+            if (HasFlow(flow, Atmospherics.Flow.East))
+            {
+                Gas.Spread(ref mix, original, west, SpreadFactor);
+                Gas.Absorb(ref mix, original, west, SpreadFactor);
+            }
+
+            if (HasFlow(flow, Atmospherics.Flow.West))
+            {
+                Gas.Spread(ref mix, original, east, SpreadFactor);
+                Gas.Absorb(ref mix, original, east, SpreadFactor);
+            }
 
             Output[index] = mix;
-            Pressure[index] = Gas.Pressure(mix);
+            Pressure[index] = mix.Pressure;
         }
     }
+
 
     [BurstCompile]
     private struct CountMolesJob : IJob
@@ -392,26 +458,77 @@ public class Atmospherics : IDisposable
         {
             _chunks.Add((x, y), new Chunk(size));
         }
+    }
 
-        //if (!_chunks.ContainsKey((x + 1, y)))
-        //{
-        //    _chunks.Add((x + 1, y), new Chunk(size));
-        //}
-        //
-        //if (!_chunks.ContainsKey((x - 1, y)))
-        //{
-        //    _chunks.Add((x - 1, y), new Chunk(size));
-        //}
-        //
-        //if (!_chunks.ContainsKey((x, y + 1)))
-        //{
-        //    _chunks.Add((x, y + 1), new Chunk(size));
-        //}
-        //
-        //if (!_chunks.ContainsKey((x, y - 1)))
-        //{
-        //    _chunks.Add((x, y - 1), new Chunk(size));
-        //}
+    public void AddWall(Flow directions, int x, int y)
+    {
+        var chunkCoordinate = ChunkCoordinate(x, y);
+
+        ActivateChunk(chunkCoordinate.Item1, chunkCoordinate.Item2);
+
+        var chunk = _chunks[chunkCoordinate];
+
+        int localX = x - (chunkCoordinate.Item1 * size);
+        int localY = (size - 1) - (y - (chunkCoordinate.Item2 * size));
+
+        var wall = chunk.Wall[localX + localY * size];
+        FlagsHelper.Set(ref wall, directions);
+        chunk.Wall[localX + localY * size] = wall;
+        
+        var flow = chunk.Flow[localX + localY * size];
+        FlagsHelper.Unset(ref flow, directions);
+        chunk.Flow[localX + localY * size] = flow;
+
+        UpdateFlow(ref wall, x - 1, y, Flow.West);
+        UpdateFlow(ref wall, x + 1, y, Flow.East);
+        
+        UpdateFlow(ref wall, x, y + 1, Flow.North);
+        UpdateFlow(ref wall, x, y - 1, Flow.South);
+    }
+
+    private void UpdateFlow(ref Flow tile, int x, int y, Flow from)
+    {
+        var chunkCoordinate = ChunkCoordinate(x, y);
+
+        ActivateChunk(chunkCoordinate.Item1, chunkCoordinate.Item2);
+
+        var chunk = _chunks[chunkCoordinate];
+
+        int localX = x - (chunkCoordinate.Item1 * size);
+        int localY = (size - 1) - (y - (chunkCoordinate.Item2 * size));
+        
+        var target = chunk.Flow[localX + localY * size];
+
+        switch (from)
+        {
+            case Flow.North:
+                if (FlagsHelper.IsSet(tile, Flow.South))
+                    FlagsHelper.Unset(ref target, Flow.North);
+                else
+                    FlagsHelper.Set(ref target, Flow.North);
+                break;
+            case Flow.South:
+                if (FlagsHelper.IsSet(tile, Flow.North))
+                    FlagsHelper.Unset(ref target, Flow.South);
+                else
+                    FlagsHelper.Set(ref target, Flow.South);
+                break;
+            case Flow.East:
+                if (FlagsHelper.IsSet(tile, Flow.West))
+                    FlagsHelper.Unset(ref target, Flow.East);
+                else
+                    FlagsHelper.Set(ref target, Flow.East);
+                break;
+            case Flow.West:
+                if (FlagsHelper.IsSet(tile, Flow.East))
+                    FlagsHelper.Unset(ref target, Flow.West);
+                else
+                    FlagsHelper.Set(ref target, Flow.West);
+                break;
+        }
+
+        chunk.Flow[localX + localY * size] = target;
+
     }
 
     public void Update()
@@ -457,7 +574,8 @@ public class Atmospherics : IDisposable
                 West = west,
                 South = south,
                 Output = chunk.Value.Gas[Convert.ToInt32(!flag)],
-                Pressure = chunk.Value.Pressure[Convert.ToInt32(!flag)],
+                Pressure = chunk.Value.Pressure,
+                Flow = chunk.Value.Flow,
                 Size = size,
                 SpreadFactor = 0.175f,
             };
@@ -515,9 +633,10 @@ public class Atmospherics : IDisposable
         var chunk = _chunks[chunkCoordinate];
 
         int localX = x - (chunkCoordinate.Item1 * size);
-        int localY = y - (chunkCoordinate.Item2 * size);
+        int localY = (size - 1) - (y - (chunkCoordinate.Item2 * size));
 
         var gas = chunk.Gas[Convert.ToInt32(flag)][localX + localY * size];
+        
         var gasToAbsorb = new Gas.Tile()
         {
             Mix = mix,
@@ -546,26 +665,63 @@ public class Atmospherics : IDisposable
         return gas;
     }
     
-    public void ChunkColor(Color[] colors, Action<Color[], (int, int)> chunkUpdated, Gradient gradient)
+    public Flow GetFlow(int x, int y)
+    {
+        var chunkCoordinate = ChunkCoordinate(x, y);
+
+        if (!_chunks.ContainsKey(chunkCoordinate))
+            return Flow.All;
+
+        var chunk = _chunks[chunkCoordinate];
+
+        int localX = x - (chunkCoordinate.Item1 * size);
+        int localY = (size - 1) - (y - (chunkCoordinate.Item2 * size));
+
+        return chunk.Flow[localX + localY * size];;
+    }
+
+    public void ChunkColor(Color[] colors, Action<Color[], (int, int)> chunkUpdated, Gradient gradient, int drawMode)
     {
         foreach (var chunk in _chunks)
         {
-            var pressures = chunk.Value.Pressure[Convert.ToInt32(!flag)];
-
+            var pressures = chunk.Value.Pressure;
+            var walls = chunk.Value.Wall;
+            var flows = chunk.Value.Flow;
+            
             for (int i = 0; i < pressures.Length; i++)
             {
-                var pressure = pressures[i];
-                
-                float deviation = Mathf.InverseLerp(0, (float) Gas.StandardPressure * 4, (float) pressure);
+                var wall = walls[i];
 
-                if (pressure == 0)
+                if (wall == Flow.All)
                 {
-                    colors[i] = new Color(0.1f, 0.1f, 0.1f, 1f);
+                    colors[i] = Color.white;
+                    continue;
                 }
-                else
+
+                if (drawMode == 1)
                 {
-                    colors[i] = gradient.Evaluate(deviation);
+                    var pressure = pressures[i];
+
+                    float deviation = Mathf.InverseLerp(0, (float) Gas.StandardPressure * 4, (float) pressure);
+
+                    if (pressure == 0)
+                    {
+                        colors[i] = new Color(0.1f, 0.1f, 0.1f, 1f);
+                    }
+                    else
+                    {
+                        colors[i] = gradient.Evaluate(deviation);
+                    }
                 }
+                else if (drawMode == 2)
+                {
+                    var flow = flows[i];
+                    int a = (int) flow;
+
+                    colors[i] = Color.HSVToRGB((float) a / (int) Flow.All, 1f, 1f);
+                }
+                
+                
             }
 
             chunkUpdated.Invoke(colors, (chunk.Key));
@@ -582,7 +738,8 @@ public class Atmospherics : IDisposable
 public class Tiler : MonoBehaviour
 {
     private Atmospherics _atmos;
-    private int Size = 32;
+    private int Size = 16;
+    private int DrawMode = 0;
     private Dictionary<(int, int), Texture2D> _textures = new Dictionary<(int, int), Texture2D>();
     [SerializeField] private Gradient gradient;
 
@@ -595,11 +752,48 @@ public class Tiler : MonoBehaviour
     void Start()
     {
         _atmos = new Atmospherics(Size);
+
+        int a = 68;
+        
+        for (int i = 0; i < 100; i++)
+        {
+            _atmos.AddWall(Atmospherics.Flow.All, a + i, a);
+        }
+        
+        for (int i = 0; i < 100; i++)
+        {
+            _atmos.AddWall(Atmospherics.Flow.All, a + i, a + 32);
+        }
+        
+        for (int i = 0; i < 35; i++)
+        {
+            _atmos.AddWall(Atmospherics.Flow.All, a + 32, a + i);
+        }
+        
+        for (int i = 0; i < 35; i++)
+        {
+            _atmos.AddWall(Atmospherics.Flow.All, a, a + i);
+        }
     }
 
     // Update is called once per frame
     void Update()
     {
+        if (Input.GetKeyDown(KeyCode.Alpha1))
+        {
+            DrawMode = 1;
+        }
+        
+        if (Input.GetKeyDown(KeyCode.Alpha2))
+        {
+            DrawMode = 2;
+        }
+        
+        if (Input.GetKeyDown(KeyCode.Alpha3))
+        {
+            DrawMode = 3;
+        }
+        
         if (Input.GetKeyDown(KeyCode.C))
         {
             int standardMoles = (int) (Gas.StandardMoles0CTile) * 1000;
@@ -613,10 +807,14 @@ public class Tiler : MonoBehaviour
                 NitrousOxide = 0
             };
 
-            _atmos.AddGas(mix,
-                293.15f,
-                UnityEngine.Random.Range(64, 96),
-                UnityEngine.Random.Range(64, 96));
+            var rect = new Rect(0, 0, Size * 2, Size * 2);
+
+            int tileX = (int) (Input.mousePosition.x / rect.width * Size);
+            int tileY = (int) ((Screen.height - Input.mousePosition.y) / rect.height * Size);
+            
+            Debug.Log(tileX + " : " + tileY);
+            
+            _atmos.AddGas(mix, 293.15f, tileX, tileY);
         }
 
         _atmos.Update();
@@ -632,6 +830,7 @@ public class Tiler : MonoBehaviour
         int tileY = (int) ((Screen.height - Input.mousePosition.y) / rect.height * Size);
 
         Color[] c = new Color[Size * Size];
+        
         _atmos.ChunkColor(c, delegate(Color[] colors, (int, int) coordinates)
         {
             if (!_textures.ContainsKey(coordinates))
@@ -651,14 +850,15 @@ public class Tiler : MonoBehaviour
             texture.Apply();
 
             GUI.DrawTexture(textureRect, texture);
-        }, gradient);
+        }, gradient, DrawMode);
 
 //
         var selectedTile = _atmos.GetGas(tileX, tileY);
 //
         GUI.Label(new Rect(20, 20, 200, 20), tileX + " " + tileY);
-        GUI.Label(new Rect(512, 30, 200, 200), $"Total Moles = {selectedTile.Moles}\n" +
-                                               $"Total Pressure = {String.Format("{0:0.00}",(Gas.Pressure(selectedTile) / 2500))} kPa\n" +
+        GUI.Label(new Rect(20, 30, 200, 20), "" + (int) _atmos.GetFlow(tileX, tileY));
+        GUI.Label(new Rect(512, 40, 200, 200), $"Total Moles = {selectedTile.Moles}\n" +
+                                               $"Total Pressure = {String.Format("{0:0.00}", (selectedTile.Pressure / 2500))} kPa\n" +
                                                $"Temperature = {String.Format("{0:0.00}", selectedTile.Temperature)} K\n" +
                                                $"Oxygen = {selectedTile.Mix.Oxygen}\n" +
                                                $"Nitrogen = {selectedTile.Mix.Nitrogen}\n" +
