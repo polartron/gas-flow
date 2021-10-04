@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using GasJobs;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
@@ -40,24 +41,20 @@ public static class Gas
 {
     public static readonly double GasConstant = 831;
     public static readonly double StandardPressure = 101325;
+    public static readonly int TileVolume = 2500;
+    public static readonly double StandardMoles0CTile = (StandardPressure * TileVolume) / (293.15 * GasConstant);
 
-    public static readonly double StandardMoles0C = (StandardPressure) / (293.15 * GasConstant);
-    public static readonly double StandardMoles0CTile = (StandardPressure * 2500) / (293.15 * GasConstant);
-    
-    
     [BurstCompile]
-    public struct Tile
+    public struct Container
     {
-        public long Moles => Mix.Oxygen + Mix.Nitrogen + Mix.CarbonDioxide + Mix.NitrousOxide + Mix.Plasma;
         public Mix Mix;
         public double Temperature;
-        
-        public double Pressure => (Moles * Temperature * GasConstant) / 2500;
     }
 
     [BurstCompile]
     public struct Mix
     {
+        public long Moles => Oxygen + Nitrogen + CarbonDioxide + NitrousOxide + Plasma;
         public int Oxygen;
         public int Nitrogen;
         public int CarbonDioxide;
@@ -65,42 +62,36 @@ public static class Gas
         public int Plasma;
     }
 
-    
-
-    private static int Moles(in Tile tile, double pressure)
+    public static double Pressure(in Container container, float volume)
     {
-        double f = tile.Temperature * GasConstant;
-        return (int) (2500 * pressure / f);
+        return (container.Mix.Moles * container.Temperature * GasConstant) / volume;
     }
 
-    private static double Temperature(Tile tile, double pressure)
+    private static int Moles(in Container container, double pressure, float volume)
     {
-        double f = tile.Moles * GasConstant;
-        return pressure / f;
+        double f = container.Temperature * GasConstant;
+        return (int) (volume * pressure / f);
     }
 
     //Remove gas from source based on pressure difference between source and target
-    public static void Spread(ref Gas.Tile source, in Gas.Tile original, in Gas.Tile target, float percentage)
+    public static void Spread(ref Gas.Container source, in Gas.Container original, in Gas.Container target, float volume, float percentage)
     {
-        double difference = original.Pressure - target.Pressure;
+        double difference = Pressure(original, volume) - Pressure(target, volume);
 
         if (difference > 0)
         {
-            int moles = Gas.Moles(source, difference * percentage);
+            int moles = Gas.Moles(source, difference * percentage, volume);
 
             if (moles == 0)
                 return;
 
-            long sourceMoles = source.Moles;
+            long sourceMoles = source.Mix.Moles;
 
             double oxygenContribution = (double) source.Mix.Oxygen / (double) sourceMoles;
             double nitrogenContribution = (double) source.Mix.Nitrogen / (double) sourceMoles;
             double carbonDioxideContribution = (double) source.Mix.CarbonDioxide / (double) sourceMoles;
             double nitrousOxideContribution = (double) source.Mix.NitrousOxide / (double) sourceMoles;
             double plasmaContribution = (double) source.Mix.Plasma / (double) sourceMoles;
-
-            double totalContribution = oxygenContribution + nitrogenContribution + carbonDioxideContribution +
-                                       nitrousOxideContribution + plasmaContribution;
 
             int oxygenTransfer = (int) ((float) (moles * oxygenContribution));
             int nitrogenTransfer = (int) ((float) (moles * nitrogenContribution));
@@ -149,42 +140,43 @@ public static class Gas
                 }
             }
 
-            source.Mix.Oxygen -= oxygenTransfer;
-            source.Mix.Nitrogen -= nitrogenTransfer;
-            source.Mix.CarbonDioxide -= carbonDioxideTransfer;
-            source.Mix.NitrousOxide -= nitrousOxideTransfer;
-            source.Mix.Plasma -= plasmaTransfer;
+            var mix = source.Mix;
+            
+            mix.Oxygen -= oxygenTransfer;
+            mix.Nitrogen -= nitrogenTransfer;
+            mix.CarbonDioxide -= carbonDioxideTransfer;
+            mix.NitrousOxide -= nitrousOxideTransfer;
+            mix.Plasma -= plasmaTransfer;
+
+            source.Mix = mix;
         }
     }
 
 
-    public static void Absorb(ref Gas.Tile source, in Gas.Tile original, in Gas.Tile target, float percentage)
+    public static void Absorb(ref Gas.Container source, in Gas.Container original, in Gas.Container target, float volume, float percentage)
     {
-        double difference = target.Pressure - original.Pressure;
+        double difference = Pressure(target, volume) - Pressure(original, volume);
 
         if (difference > 0)
         {
-            int moles = Gas.Moles(target, difference * percentage);
+            int moles = Gas.Moles(target, difference * percentage, volume);
 
             if (moles == 0)
                 return;
 
-            long molesAfter = source.Moles + moles;
+            long molesAfter = source.Mix.Moles + moles;
 
             double temperatureTransferScale = (double) moles / (double) molesAfter;
             double temperatureMove = (target.Temperature - source.Temperature) * temperatureTransferScale;
             source.Temperature += temperatureMove;
 
-            long targetMoles = target.Moles;
+            long targetMoles = target.Mix.Moles;
 
             double oxygenContribution = (double) target.Mix.Oxygen / (double) targetMoles;
             double nitrogenContribution = (double) target.Mix.Nitrogen / (double) targetMoles;
             double carbonDioxideContribution = (double) target.Mix.CarbonDioxide / (double) targetMoles;
             double nitrousOxideContribution = (double) target.Mix.NitrousOxide / (double) targetMoles;
             double plasmaContribution = (double) target.Mix.Plasma / (double) targetMoles;
-
-            double totalContribution = oxygenContribution + nitrogenContribution + carbonDioxideContribution +
-                                       nitrousOxideContribution + plasmaContribution;
 
             int oxygenTransfer = (int) ((float) (moles * oxygenContribution));
             int nitrogenTransfer = (int) ((float) (moles * nitrogenContribution));
@@ -239,15 +231,15 @@ public static class Gas
     }
 }
 
-public class Atmospherics : IDisposable
+public partial class Atmospherics : IDisposable
 {
     public class Chunk : IDisposable
     {
         public Chunk(int size)
         {
-            Gas = new NativeArray<Gas.Tile>[2];
-            Gas[0] = new NativeArray<Gas.Tile>(size * size, Allocator.Persistent);
-            Gas[1] = new NativeArray<Gas.Tile>(size * size, Allocator.Persistent);
+            Gas = new NativeArray<Gas.Container>[2];
+            Gas[0] = new NativeArray<Gas.Container>(size * size, Allocator.Persistent);
+            Gas[1] = new NativeArray<Gas.Container>(size * size, Allocator.Persistent);
             
             
             Flow = new NativeArray<Flow>(size * size, Allocator.Persistent);
@@ -261,7 +253,7 @@ public class Atmospherics : IDisposable
             Pressure = new NativeArray<double>(size * size, Allocator.Persistent);
         }
 
-        public NativeArray<Gas.Tile>[] Gas;
+        public NativeArray<Gas.Container>[] Gas;
         public NativeArray<double> Pressure;
         public NativeArray<Flow> Wall;
         public NativeArray<Flow> Flow;
@@ -286,140 +278,13 @@ public class Atmospherics : IDisposable
         All = 15
     }
 
-    private static bool HasFlow(Flow flow, Flow flag)
-    {
-        return (flow & flag) != 0;
-    }
 
-    [BurstCompile]
-    private struct GasSpreadJob : IJobParallelFor
-    {
-        [ReadOnly] public NativeArray<Gas.Tile> Input;
-        [ReadOnly] public NativeArray<Gas.Tile> East;
-        [ReadOnly] public NativeArray<Gas.Tile> North;
-        [ReadOnly] public NativeArray<Gas.Tile> South;
-        [ReadOnly] public NativeArray<Gas.Tile> West;
-        [WriteOnly] public NativeArray<Gas.Tile> Output;
-        [WriteOnly] public NativeArray<double> Pressure;
-        [ReadOnly] public NativeArray<Flow> Flow;
-        [ReadOnly] public int Size;
-        [ReadOnly] public float SpreadFactor;
-
-        public void Execute(int index)
-        {
-            int x = index % Size;
-            int y = index / Size;
-
-            Gas.Tile east = default;
-
-            if (x + 1 >= Size)
-            {
-                if (East == Input)
-                {
-                    east = new Gas.Tile();
-                }
-                else
-                {
-                    east = East[y * Size];
-                }
-            }
-            else
-            {
-                east = Input[x + 1 + y * Size];
-            }
-
-            Gas.Tile west = default;
-
-            if (x - 1 < 0)
-            {
-                if (West == Input)
-                {
-                    west = new Gas.Tile();
-                }
-                else
-                {
-                    west = West[(Size - 1) + y * Size];
-                }
-            }
-            else
-            {
-                west = Input[x - 1 + y * Size];
-            }
-
-            Gas.Tile north = default;
-            Gas.Tile south = default;
-
-            if (y + 1 >= Size)
-            {
-                if (South == Input)
-                {
-                    south = new Gas.Tile();
-                }
-                else
-                {
-                    south = South[x];
-                }
-            }
-            else
-            {
-                south = Input[x + (y + 1) * Size];
-            }
-
-            if (y - 1 < 0)
-            {
-                if (North == Input)
-                {
-                    north = new Gas.Tile();
-                }
-                else
-                {
-                    north = North[x + (Size - 1) * Size];
-                }
-            }
-            else
-            {
-                north = Input[x + (y - 1) * Size];
-            }
-
-            Gas.Tile original = Input[index];
-            Gas.Tile mix = original;
-
-            Flow flow = Flow[index];
-            
-            if (HasFlow(flow, Atmospherics.Flow.North))
-            {
-                Gas.Spread(ref mix, original, south, SpreadFactor);
-                Gas.Absorb(ref mix, original, south, SpreadFactor);
-            }
-
-            if (HasFlow(flow, Atmospherics.Flow.South))
-            {
-                Gas.Spread(ref mix, original, north, SpreadFactor);
-                Gas.Absorb(ref mix, original, north, SpreadFactor);
-            }
-
-            if (HasFlow(flow, Atmospherics.Flow.East))
-            {
-                Gas.Spread(ref mix, original, west, SpreadFactor);
-                Gas.Absorb(ref mix, original, west, SpreadFactor);
-            }
-
-            if (HasFlow(flow, Atmospherics.Flow.West))
-            {
-                Gas.Spread(ref mix, original, east, SpreadFactor);
-                Gas.Absorb(ref mix, original, east, SpreadFactor);
-            }
-
-            Output[index] = mix;
-            Pressure[index] = mix.Pressure;
-        }
-    }
 
 
     [BurstCompile]
     private struct CountMolesJob : IJob
     {
-        [ReadOnly] public NativeArray<Gas.Tile> Input;
+        [ReadOnly] public NativeArray<Gas.Container> Input;
         [WriteOnly] public NativeArray<long> TotalMoles;
 
         public void Execute()
@@ -427,7 +292,7 @@ public class Atmospherics : IDisposable
             long total = 0;
             for (int i = 0; i < Input.Length; i++)
             {
-                total += Input[i].Moles;
+                total += Input[i].Mix.Moles;
             }
 
             TotalMoles[0] = total;
@@ -542,25 +407,25 @@ public class Atmospherics : IDisposable
         {
             var middle = chunk.Value.Gas[Convert.ToInt32(flag)];
 
-            NativeArray<Gas.Tile> east;
+            NativeArray<Gas.Container> east;
             if (_chunks.ContainsKey((chunk.Key.x + 1, chunk.Key.y)))
                 east = _chunks[(chunk.Key.x + 1, chunk.Key.y)].Gas[Convert.ToInt32(flag)];
             else
                 east = middle;
 
-            NativeArray<Gas.Tile> west;
+            NativeArray<Gas.Container> west;
             if (_chunks.ContainsKey((chunk.Key.x - 1, chunk.Key.y)))
                 west = _chunks[(chunk.Key.x - 1, chunk.Key.y)].Gas[Convert.ToInt32(flag)];
             else
                 west = middle;
 
-            NativeArray<Gas.Tile> north;
+            NativeArray<Gas.Container> north;
             if (_chunks.ContainsKey((chunk.Key.x, chunk.Key.y + 1)))
                 north = _chunks[(chunk.Key.x, chunk.Key.y + 1)].Gas[Convert.ToInt32(flag)];
             else
                 north = middle;
 
-            NativeArray<Gas.Tile> south;
+            NativeArray<Gas.Container> south;
             if (_chunks.ContainsKey((chunk.Key.x, chunk.Key.y - 1)))
                 south = _chunks[(chunk.Key.x, chunk.Key.y - 1)].Gas[Convert.ToInt32(flag)];
             else
@@ -637,24 +502,24 @@ public class Atmospherics : IDisposable
 
         var gas = chunk.Gas[Convert.ToInt32(flag)][localX + localY * size];
         
-        var gasToAbsorb = new Gas.Tile()
+        var gasToAbsorb = new Gas.Container()
         {
             Mix = mix,
             Temperature = temperature
         };
 
-        Gas.Absorb(ref gas, gas, gasToAbsorb, 1f);
+        Gas.Absorb(ref gas, gas, gasToAbsorb, Gas.TileVolume, 1f);
 
         chunk.Gas[0][localX + localY * size] = gas;
         chunk.Gas[1][localX + localY * size] = gas;
     }
 
-    public Gas.Tile GetGas(int x, int y)
+    public Gas.Container GetGas(int x, int y)
     {
         var chunkCoordinate = ChunkCoordinate(x, y);
 
         if (!_chunks.ContainsKey(chunkCoordinate))
-            return new Gas.Tile();
+            return new Gas.Container();
 
         var chunk = _chunks[chunkCoordinate];
 
@@ -720,8 +585,6 @@ public class Atmospherics : IDisposable
 
                     colors[i] = Color.HSVToRGB((float) a / (int) Flow.All, 1f, 1f);
                 }
-                
-                
             }
 
             chunkUpdated.Invoke(colors, (chunk.Key));
@@ -857,8 +720,8 @@ public class Tiler : MonoBehaviour
 //
         GUI.Label(new Rect(20, 20, 200, 20), tileX + " " + tileY);
         GUI.Label(new Rect(20, 30, 200, 20), "" + (int) _atmos.GetFlow(tileX, tileY));
-        GUI.Label(new Rect(512, 40, 200, 200), $"Total Moles = {selectedTile.Moles}\n" +
-                                               $"Total Pressure = {String.Format("{0:0.00}", (selectedTile.Pressure / 2500))} kPa\n" +
+        GUI.Label(new Rect(512, 40, 200, 200), $"Total Moles = {selectedTile.Mix.Moles}\n" +
+                                               $"Total Pressure = {String.Format("{0:0.00}", (Gas.Pressure(selectedTile, 2500) / 2500))} kPa\n" +
                                                $"Temperature = {String.Format("{0:0.00}", selectedTile.Temperature)} K\n" +
                                                $"Oxygen = {selectedTile.Mix.Oxygen}\n" +
                                                $"Nitrogen = {selectedTile.Mix.Nitrogen}\n" +
