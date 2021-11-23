@@ -130,6 +130,8 @@ namespace Tiler.Jobs
                 Gas.Absorb(ref mix, original, east, Gas.TileVolume, SpreadFactor);
             }
 
+            
+            
             Output[index] = mix;
             Pressure[index] = Gas.Pressure(mix, Gas.TileVolume);
         }

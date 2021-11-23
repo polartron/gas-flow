@@ -8,9 +8,9 @@ namespace Tiler
 {
     public static class Gas
     {
-        public static readonly double GasConstant = 831;
+        public static readonly double GasConstant = 8.31446261815324;
         public static readonly double StandardPressure = 101325;
-        public static readonly int TileVolume = 2500;
+        public static readonly float TileVolume = 1;
         public static readonly double StandardMoles0CTile = (StandardPressure * TileVolume) / (293.15 * GasConstant);
 
         [BurstCompile]

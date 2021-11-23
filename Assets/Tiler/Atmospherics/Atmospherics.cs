@@ -4,6 +4,7 @@ using Unity.Collections;
 using Unity.Jobs;
 using UnityEngine;
 using Tiler.Jobs;
+using Unity.Mathematics;
 
 namespace Tiler
 {
@@ -52,7 +53,8 @@ namespace Tiler
             South = 2,
             East = 4,
             West = 8,
-            All = 15
+            Middle = 16,
+            All = 31
         }
 
         public Atmospherics(int chunkSize)
@@ -100,13 +102,49 @@ namespace Tiler
             var wall = blocking;
             chunk.Wall[localX + localY * size] = wall;
 
+            if (blocking == Flow.All)
+            {
+                var source = chunk.Gas[Convert.ToInt32(flag)][localX + localY * size];
+
+                bool transfered = false;
+
+                if (!FlagsHelper.IsSet(GetWall(x - 1, y), Flow.West))
+                {
+                    AddGas(source.Mix, source.Temperature, x - 1, y, true);
+                    transfered = true;
+                }
+
+                if (!transfered && !FlagsHelper.IsSet(GetWall(x + 1, y), Flow.East))
+                {
+                    AddGas(source.Mix, source.Temperature, x + 1, y, true);
+                    transfered = true;
+                }
+
+                if (!transfered && !FlagsHelper.IsSet(GetWall(x, y - 1), Flow.South))
+                {
+                    AddGas(source.Mix, source.Temperature, x, y - 1, true);
+                    transfered = true;
+                }
+
+                if (!transfered && !FlagsHelper.IsSet(GetWall(x, y + 1), Flow.North))
+                {
+                    AddGas(source.Mix, source.Temperature, x, y + 1, true);
+                    transfered = true;
+                }
+
+                if (transfered)
+                {
+                    chunk.Gas[Convert.ToInt32(flag)][localX + localY * size] = new Gas.Container();
+                    chunk.Gas[Convert.ToInt32(!flag)][localX + localY * size] = new Gas.Container();
+                }
+            }
+
             RefreshTile(x, y);
             RefreshTile(x + 1, y);
             RefreshTile(x - 1, y);
             RefreshTile(x, y + 1);
             RefreshTile(x, y - 1);
         }
-
 
         private void RefreshTile(int x, int y)
         {
@@ -125,67 +163,23 @@ namespace Tiler
             {
                 FlagsHelper.Set(ref flow, Flow.East);
             }
-            
+
             if (!FlagsHelper.IsSet(wall, Flow.West) && !FlagsHelper.IsSet(GetWall(x + 1, y), Flow.East))
             {
                 FlagsHelper.Set(ref flow, Flow.West);
             }
-            
+
             if (!FlagsHelper.IsSet(wall, Flow.North) && !FlagsHelper.IsSet(GetWall(x, y - 1), Flow.South))
             {
                 FlagsHelper.Set(ref flow, Flow.North);
             }
-            
+
             if (!FlagsHelper.IsSet(wall, Flow.South) && !FlagsHelper.IsSet(GetWall(x, y + 1), Flow.North))
             {
                 FlagsHelper.Set(ref flow, Flow.South);
             }
 
             chunk.Flow[localX + localY * size] = flow;
-        }
-
-        private void UpdateFlow(ref Flow tile, int x, int y, Flow from)
-        {
-            var chunkCoordinate = ChunkCoordinate(x, y);
-
-            ActivateChunk(chunkCoordinate.Item1, chunkCoordinate.Item2);
-
-            var chunk = _chunks[chunkCoordinate];
-
-            int localX = x - (chunkCoordinate.Item1 * size);
-            int localY = (size - 1) - (y - (chunkCoordinate.Item2 * size));
-
-            var target = chunk.Flow[localX + localY * size];
-
-            switch (from)
-            {
-                case Flow.North:
-                    if (FlagsHelper.IsSet(tile, Flow.South))
-                        FlagsHelper.Unset(ref target, Flow.North);
-                    else
-                        FlagsHelper.Set(ref target, Flow.North);
-                    break;
-                case Flow.South:
-                    if (FlagsHelper.IsSet(tile, Flow.North))
-                        FlagsHelper.Unset(ref target, Flow.South);
-                    else
-                        FlagsHelper.Set(ref target, Flow.South);
-                    break;
-                case Flow.East:
-                    if (FlagsHelper.IsSet(tile, Flow.West))
-                        FlagsHelper.Unset(ref target, Flow.East);
-                    else
-                        FlagsHelper.Set(ref target, Flow.East);
-                    break;
-                case Flow.West:
-                    if (FlagsHelper.IsSet(tile, Flow.East))
-                        FlagsHelper.Unset(ref target, Flow.West);
-                    else
-                        FlagsHelper.Set(ref target, Flow.West);
-                    break;
-            }
-
-            chunk.Flow[localX + localY * size] = target;
         }
 
         internal void InitializeAllChunks(Map map)
@@ -200,7 +194,7 @@ namespace Tiler
 
                     if (tile.Type == Map.Tile.TileType.Wall)
                     {
-                        map.ChangeTile(tile, chunk.Key.x * size + x,  chunk.Key.y * size + y);
+                        map.ChangeTile(tile, chunk.Key.x * size + x, chunk.Key.y * size + y);
                     }
                 }
             }
@@ -260,7 +254,7 @@ namespace Tiler
                     Pressure = chunk.Value.Pressure,
                     Flow = chunk.Value.Flow,
                     Size = size,
-                    SpreadFactor = 0.25f,
+                    SpreadFactor = 0.175f,
                 };
 
                 jobs[i] = job.Schedule(size * size, 4);
@@ -307,8 +301,11 @@ namespace Tiler
             flag = !flag;
         }
 
-        public void AddGas(Gas.Mix mix, float temperature, int x, int y)
+        public void AddGas(Gas.Mix mix, double temperature, int x, int y, bool compress = false)
         {
+            if (mix.Moles == 0)
+                return;
+            
             var chunkCoordinate = ChunkCoordinate(x, y);
 
             ActivateChunk(chunkCoordinate.Item1, chunkCoordinate.Item2);
@@ -326,7 +323,23 @@ namespace Tiler
                 Temperature = temperature
             };
 
-            Gas.Absorb(ref gas, gas, gasToAbsorb, Gas.TileVolume, 1f);
+            if (compress && gas.Temperature > 0)
+            {
+                Gas.Absorb(ref gas, new Gas.Container(), gasToAbsorb, Gas.TileVolume * 2, 1f);
+                double v1 = Gas.TileVolume * 2;
+                double v2 = Gas.TileVolume;
+                double p1 = Gas.Pressure(gas, (float) v1);
+                double k = p1 * math.pow(v1, 1.6651607999999998);
+                double p2 = k / math.pow(v2, 1.6651607999999998);
+                double t2 = (p2 * v2) / (Gas.GasConstant * gas.Mix.Moles);
+                gas.Temperature = t2;
+
+            }
+            else
+            {
+                
+                Gas.Absorb(ref gas, new Gas.Container(), gasToAbsorb, Gas.TileVolume, 1f);
+            }
 
             chunk.Gas[0][localX + localY * size] = gas;
             chunk.Gas[1][localX + localY * size] = gas;
@@ -362,7 +375,7 @@ namespace Tiler
 
             return chunk.Flow[localX + localY * size];
         }
-        
+
         public Flow GetWall(int x, int y)
         {
             var chunkCoordinate = ChunkCoordinate(x, y);
@@ -395,7 +408,7 @@ namespace Tiler
                     {
                         colors[i] = Color.white;
                     }
-                    else if(wall == Flow.None)
+                    else if (wall == Flow.None)
                     {
                         colors[i] = Color.gray;
                     }
@@ -408,7 +421,7 @@ namespace Tiler
 
                         if (pressure == 0)
                         {
-                            colors[i] = new Color(0.1f, 0.1f, 0.1f, 1f);
+                            //colors[i] = new Color(0.1f, 0.1f, 0.1f, 1f);
                         }
                         else
                         {
