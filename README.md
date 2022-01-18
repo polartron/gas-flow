@@ -3,7 +3,7 @@
 
 V + Mouse Click to add walls
 
-B + Mouse CLick to remove walls
+B + Mouse Click to remove walls
 
 C + Mouse Click to spawn gas
 
