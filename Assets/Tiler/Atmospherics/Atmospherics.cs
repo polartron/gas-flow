@@ -17,8 +17,6 @@ namespace Tiler
                 Gas = new NativeArray<Gas.Container>[2];
                 Gas[0] = new NativeArray<Gas.Container>(size * size, Allocator.Persistent);
                 Gas[1] = new NativeArray<Gas.Container>(size * size, Allocator.Persistent);
-
-
                 Flow = new NativeArray<Flow>(size * size, Allocator.Persistent);
                 Wall = new NativeArray<Flow>(size * size, Allocator.Persistent);
 

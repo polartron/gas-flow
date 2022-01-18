@@ -43,7 +43,7 @@ namespace Tiler
         }
 
         //Remove gas from source based on pressure difference between source and target
-        public static void Spread(ref Gas.Container source, in Gas.Container original, in Gas.Container target,
+        public static void Spread(ref Container source, in Container original, in Container target,
             float volume, float percentage)
         {
             double difference = Pressure(original, volume) - Pressure(target, volume);
@@ -124,7 +124,7 @@ namespace Tiler
         }
 
 
-        public static void Absorb(ref Gas.Container source, in Gas.Container original, in Gas.Container target,
+        public static void Absorb(ref Container source, in Container original, in Container target,
             float volume, float percentage)
         {
             double difference = Pressure(target, volume) - Pressure(original, volume);

@@ -22,6 +22,7 @@ namespace Tiler
         private void OnDestroy()
         {
             _atmos.Dispose();
+            _map.Dispose();
         }
 
         // Start is called before the first frame update
