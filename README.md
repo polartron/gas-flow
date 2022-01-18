@@ -3,4 +3,10 @@
 
 V + Mouse Click to add walls
 
+B + Mouse CLick to remove walls
+
 C + Mouse Click to spawn gas
+
+F5 to save simulation
+
+F6 to load simulation
